@@ -1,7 +1,8 @@
+use crate::container;
 use crate::event::{self, Event};
 use crate::layout;
 use crate::pane_grid;
-use crate::{Clipboard, Element, Hasher, Layout, Point, Size};
+use crate::{Clipboard, Element, Hasher, Layout, Point, Rectangle, Size};
 
 /// The title bar of a [`Pane`].
 ///
@@ -12,7 +13,7 @@ pub struct TitleBar<'a, Message, Renderer: pane_grid::Renderer> {
     controls: Option<Element<'a, Message, Renderer>>,
     padding: u16,
     always_show_controls: bool,
-    style: Renderer::Style,
+    style: <Renderer as container::Renderer>::Style,
 }
 
 impl<'a, Message, Renderer> TitleBar<'a, Message, Renderer>
@@ -29,7 +30,7 @@ where
             controls: None,
             padding: 0,
             always_show_controls: false,
-            style: Renderer::Style::default(),
+            style: Default::default(),
         }
     }
 
@@ -49,7 +50,10 @@ where
     }
 
     /// Sets the style of the [`TitleBar`].
-    pub fn style(mut self, style: impl Into<Renderer::Style>) -> Self {
+    pub fn style(
+        mut self,
+        style: impl Into<<Renderer as container::Renderer>::Style>,
+    ) -> Self {
         self.style = style.into();
         self
     }
@@ -81,6 +85,7 @@ where
         defaults: &Renderer::Defaults,
         layout: Layout<'_>,
         cursor_position: Point,
+        viewport: &Rectangle,
         show_controls: bool,
     ) -> Renderer::Output {
         let mut children = layout.children();
@@ -108,6 +113,7 @@ where
             (&self.content, title_layout),
             controls,
             cursor_position,
+            viewport,
         )
     }
 
@@ -143,6 +149,10 @@ where
 
         self.content.hash_layout(hasher);
         self.padding.hash(hasher);
+
+        if let Some(controls) = &self.controls {
+            controls.hash_layout(hasher);
+        }
     }
 
     pub(crate) fn layout(
@@ -191,9 +201,9 @@ where
         event: Event,
         layout: Layout<'_>,
         cursor_position: Point,
-        messages: &mut Vec<Message>,
         renderer: &Renderer,
-        clipboard: Option<&dyn Clipboard>,
+        clipboard: &mut dyn Clipboard,
+        messages: &mut Vec<Message>,
     ) -> event::Status {
         if let Some(controls) = &mut self.controls {
             let mut children = layout.children();
@@ -207,9 +217,9 @@ where
                 event,
                 controls_layout,
                 cursor_position,
-                messages,
                 renderer,
                 clipboard,
+                messages,
             )
         } else {
             event::Status::Ignored

@@ -33,6 +33,7 @@ use crate::layout;
 use crate::mouse;
 use crate::overlay;
 use crate::row;
+use crate::touch;
 use crate::{
     Clipboard, Element, Hasher, Layout, Length, Point, Rectangle, Size, Vector,
     Widget,
@@ -97,6 +98,7 @@ pub struct PaneGrid<'a, Message, Renderer: self::Renderer> {
     on_click: Option<Box<dyn Fn(Pane) -> Message + 'a>>,
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
     on_resize: Option<(u16, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
+    style: <Renderer as self::Renderer>::Style,
 }
 
 impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer>
@@ -128,6 +130,7 @@ where
             on_click: None,
             on_drag: None,
             on_resize: None,
+            style: Default::default(),
         }
     }
 
@@ -183,6 +186,15 @@ where
         F: 'a + Fn(ResizeEvent) -> Message,
     {
         self.on_resize = Some((leeway, Box::new(f)));
+        self
+    }
+
+    /// Sets the style of the [`PaneGrid`].
+    pub fn style(
+        mut self,
+        style: impl Into<<Renderer as self::Renderer>::Style>,
+    ) -> Self {
+        self.style = style.into();
         self
     }
 }
@@ -350,49 +362,41 @@ where
         event: Event,
         layout: Layout<'_>,
         cursor_position: Point,
-        messages: &mut Vec<Message>,
         renderer: &Renderer,
-        clipboard: Option<&dyn Clipboard>,
+        clipboard: &mut dyn Clipboard,
+        messages: &mut Vec<Message>,
     ) -> event::Status {
         let mut event_status = event::Status::Ignored;
 
         match event {
-            Event::Mouse(mouse_event) => match mouse_event {
-                mouse::Event::ButtonPressed(mouse::Button::Left) => {
-                    let bounds = layout.bounds();
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+            | Event::Touch(touch::Event::FingerPressed { .. }) => {
+                let bounds = layout.bounds();
 
-                    if bounds.contains(cursor_position) {
-                        event_status = event::Status::Captured;
+                if bounds.contains(cursor_position) {
+                    event_status = event::Status::Captured;
 
-                        match self.on_resize {
-                            Some((leeway, _)) => {
-                                let relative_cursor = Point::new(
-                                    cursor_position.x - bounds.x,
-                                    cursor_position.y - bounds.y,
-                                );
+                    match self.on_resize {
+                        Some((leeway, _)) => {
+                            let relative_cursor = Point::new(
+                                cursor_position.x - bounds.x,
+                                cursor_position.y - bounds.y,
+                            );
 
-                                let splits = self.state.split_regions(
-                                    f32::from(self.spacing),
-                                    Size::new(bounds.width, bounds.height),
-                                );
+                            let splits = self.state.split_regions(
+                                f32::from(self.spacing),
+                                Size::new(bounds.width, bounds.height),
+                            );
 
-                                let clicked_split = hovered_split(
-                                    splits.iter(),
-                                    f32::from(self.spacing + leeway),
-                                    relative_cursor,
-                                );
+                            let clicked_split = hovered_split(
+                                splits.iter(),
+                                f32::from(self.spacing + leeway),
+                                relative_cursor,
+                            );
 
-                                if let Some((split, axis)) = clicked_split {
-                                    self.state.pick_split(&split, axis);
-                                } else {
-                                    self.click_pane(
-                                        layout,
-                                        cursor_position,
-                                        messages,
-                                    );
-                                }
-                            }
-                            None => {
+                            if let Some((split, axis, _)) = clicked_split {
+                                self.state.pick_split(&split, axis);
+                            } else {
                                 self.click_pane(
                                     layout,
                                     cursor_position,
@@ -400,47 +404,51 @@ where
                                 );
                             }
                         }
-                    }
-                }
-                mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                    if let Some((pane, _)) = self.state.picked_pane() {
-                        if let Some(on_drag) = &self.on_drag {
-                            let mut dropped_region = self
-                                .elements
-                                .iter()
-                                .zip(layout.children())
-                                .filter(|(_, layout)| {
-                                    layout.bounds().contains(cursor_position)
-                                });
-
-                            let event = match dropped_region.next() {
-                                Some(((target, _), _)) if pane != *target => {
-                                    DragEvent::Dropped {
-                                        pane,
-                                        target: *target,
-                                    }
-                                }
-                                _ => DragEvent::Canceled { pane },
-                            };
-
-                            messages.push(on_drag(event));
+                        None => {
+                            self.click_pane(layout, cursor_position, messages);
                         }
-
-                        self.state.idle();
-
-                        event_status = event::Status::Captured;
-                    } else if self.state.picked_split().is_some() {
-                        self.state.idle();
-
-                        event_status = event::Status::Captured;
                     }
                 }
-                mouse::Event::CursorMoved { .. } => {
-                    event_status =
-                        self.trigger_resize(layout, cursor_position, messages);
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+            | Event::Touch(touch::Event::FingerLifted { .. })
+            | Event::Touch(touch::Event::FingerLost { .. }) => {
+                if let Some((pane, _)) = self.state.picked_pane() {
+                    if let Some(on_drag) = &self.on_drag {
+                        let mut dropped_region =
+                            self.elements.iter().zip(layout.children()).filter(
+                                |(_, layout)| {
+                                    layout.bounds().contains(cursor_position)
+                                },
+                            );
+
+                        let event = match dropped_region.next() {
+                            Some(((target, _), _)) if pane != *target => {
+                                DragEvent::Dropped {
+                                    pane,
+                                    target: *target,
+                                }
+                            }
+                            _ => DragEvent::Canceled { pane },
+                        };
+
+                        messages.push(on_drag(event));
+                    }
+
+                    self.state.idle();
+
+                    event_status = event::Status::Captured;
+                } else if self.state.picked_split().is_some() {
+                    self.state.idle();
+
+                    event_status = event::Status::Captured;
                 }
-                _ => {}
-            },
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. })
+            | Event::Touch(touch::Event::FingerMoved { .. }) => {
+                event_status =
+                    self.trigger_resize(layout, cursor_position, messages);
+            }
             _ => {}
         }
 
@@ -453,9 +461,9 @@ where
                         event.clone(),
                         layout,
                         cursor_position,
-                        messages,
                         renderer,
                         clipboard,
+                        messages,
                     )
                 })
                 .fold(event_status, event::Status::merge)
@@ -470,11 +478,28 @@ where
         defaults: &Renderer::Defaults,
         layout: Layout<'_>,
         cursor_position: Point,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) -> Renderer::Output {
         let picked_split = self
             .state
             .picked_split()
+            .and_then(|(split, axis)| {
+                let bounds = layout.bounds();
+
+                let splits = self
+                    .state
+                    .split_regions(f32::from(self.spacing), bounds.size());
+
+                let (_axis, region, ratio) = splits.get(&split)?;
+
+                let region = axis.split_line_bounds(
+                    *region,
+                    *ratio,
+                    f32::from(self.spacing),
+                );
+
+                Some((axis, region + Vector::new(bounds.x, bounds.y), true))
+            })
             .or_else(|| match self.on_resize {
                 Some((leeway, _)) => {
                     let bounds = layout.bounds();
@@ -488,15 +513,20 @@ where
                         .state
                         .split_regions(f32::from(self.spacing), bounds.size());
 
-                    hovered_split(
+                    let (_split, axis, region) = hovered_split(
                         splits.iter(),
                         f32::from(self.spacing + leeway),
                         relative_cursor,
-                    )
+                    )?;
+
+                    Some((
+                        axis,
+                        region + Vector::new(bounds.x, bounds.y),
+                        false,
+                    ))
                 }
                 None => None,
-            })
-            .map(|(_, axis)| axis);
+            });
 
         self::Renderer::draw(
             renderer,
@@ -505,7 +535,9 @@ where
             self.state.picked_pane(),
             picked_split,
             layout,
+            &self.style,
             cursor_position,
+            viewport,
         )
     }
 
@@ -543,6 +575,9 @@ where
 ///
 /// [renderer]: crate::renderer
 pub trait Renderer: crate::Renderer + container::Renderer + Sized {
+    /// The style supported by this renderer.
+    type Style: Default;
+
     /// Draws a [`PaneGrid`].
     ///
     /// It receives:
@@ -556,9 +591,11 @@ pub trait Renderer: crate::Renderer + container::Renderer + Sized {
         defaults: &Self::Defaults,
         content: &[(Pane, Content<'_, Message, Self>)],
         dragging: Option<(Pane, Point)>,
-        resizing: Option<Axis>,
+        resizing: Option<(Axis, Rectangle, bool)>,
         layout: Layout<'_>,
+        style: &<Self as self::Renderer>::Style,
         cursor_position: Point,
+        viewport: &Rectangle,
     ) -> Self::Output;
 
     /// Draws a [`Pane`].
@@ -572,10 +609,11 @@ pub trait Renderer: crate::Renderer + container::Renderer + Sized {
         &mut self,
         defaults: &Self::Defaults,
         bounds: Rectangle,
-        style: &Self::Style,
+        style: &<Self as container::Renderer>::Style,
         title_bar: Option<(&TitleBar<'_, Message, Self>, Layout<'_>)>,
         body: (&Element<'_, Message, Self>, Layout<'_>),
         cursor_position: Point,
+        viewport: &Rectangle,
     ) -> Self::Output;
 
     /// Draws a [`TitleBar`].
@@ -590,10 +628,11 @@ pub trait Renderer: crate::Renderer + container::Renderer + Sized {
         &mut self,
         defaults: &Self::Defaults,
         bounds: Rectangle,
-        style: &Self::Style,
+        style: &<Self as container::Renderer>::Style,
         content: (&Element<'_, Message, Self>, Layout<'_>),
         controls: Option<(&Element<'_, Message, Self>, Layout<'_>)>,
         cursor_position: Point,
+        viewport: &Rectangle,
     ) -> Self::Output;
 }
 
@@ -617,14 +656,14 @@ fn hovered_split<'a>(
     splits: impl Iterator<Item = (&'a Split, &'a (Axis, Rectangle, f32))>,
     spacing: f32,
     cursor_position: Point,
-) -> Option<(Split, Axis)> {
+) -> Option<(Split, Axis, Rectangle)> {
     splits
         .filter_map(|(split, (axis, region, ratio))| {
             let bounds =
                 axis.split_line_bounds(*region, *ratio, f32::from(spacing));
 
             if bounds.contains(cursor_position) {
-                Some((*split, *axis))
+                Some((*split, *axis, bounds))
             } else {
                 None
             }
